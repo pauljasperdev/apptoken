@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import {
   runGh,
+  runGit,
   type CommandResult,
   CommandNotFound,
   CommandFailed,
@@ -94,6 +95,112 @@ describe("CommandExecutor", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.stderr.trim()).toBe("stderr output");
+    });
+  });
+
+  describe("runGit", () => {
+    test("runs git and captures stdout", async () => {
+      const result: CommandResult = await Effect.runPromise(
+        runGit(["--version"], "test-token")
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toMatch(/^git version/);
+    });
+
+    test("prepends -c flags before user args", async () => {
+      const result = await Effect.runPromise(
+        runGit(["config", "--get", "url.https://github.com/.insteadOf"], "test-token")
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe("git@github.com:");
+    });
+
+    test("sets APPTOKEN_GIT_TOKEN in child environment", async () => {
+      const token = "ghs_git_test_token_value";
+      const result = await Effect.runPromise(
+        runGit(
+          ["-c", "alias.printenv=!echo $APPTOKEN_GIT_TOKEN", "printenv"],
+          token
+        )
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe(token);
+    });
+
+    test("removes GITHUB_TOKEN from child environment", async () => {
+      const original = process.env["GITHUB_TOKEN"];
+      process.env["GITHUB_TOKEN"] = "should_be_removed";
+      try {
+        const result = await Effect.runPromise(
+          runGit(
+            ["-c", "alias.printenv=!echo ${GITHUB_TOKEN:-unset}", "printenv"],
+            "test-token"
+          )
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.trim()).toBe("unset");
+      } finally {
+        if (original !== undefined) {
+          process.env["GITHUB_TOKEN"] = original;
+        } else {
+          delete process.env["GITHUB_TOKEN"];
+        }
+      }
+    });
+
+    test("removes GH_TOKEN from child environment", async () => {
+      const original = process.env["GH_TOKEN"];
+      process.env["GH_TOKEN"] = "should_be_removed";
+      try {
+        const result = await Effect.runPromise(
+          runGit(
+            ["-c", "alias.printenv=!echo ${GH_TOKEN:-unset}", "printenv"],
+            "test-token"
+          )
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.trim()).toBe("unset");
+      } finally {
+        if (original !== undefined) {
+          process.env["GH_TOKEN"] = original;
+        } else {
+          delete process.env["GH_TOKEN"];
+        }
+      }
+    });
+
+    test("returns CommandNotFound when executable does not exist", async () => {
+      const result = await Effect.runPromise(
+        Effect.either(
+          runGit(["push"], "test-token", "nonexistent-git-binary-xyz")
+        )
+      );
+
+      expect(result._tag).toBe("Left");
+      if (result._tag === "Left") {
+        expect(result.left).toBeInstanceOf(CommandNotFound);
+        if (result.left instanceof CommandNotFound) {
+          expect(result.left.command).toBe("nonexistent-git-binary-xyz");
+        }
+      }
+    });
+
+    test("returns CommandFailed for non-zero exit code", async () => {
+      const result = await Effect.runPromise(
+        Effect.either(
+          runGit(["log", "--invalid-flag-xyz"], "test-token")
+        )
+      );
+
+      expect(result._tag).toBe("Left");
+      if (result._tag === "Left") {
+        expect(result.left).toBeInstanceOf(CommandFailed);
+      }
     });
   });
 });

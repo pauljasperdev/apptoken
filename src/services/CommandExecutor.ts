@@ -72,3 +72,66 @@ export function runGh(
     }
   );
 }
+
+export function runGit(
+  args: readonly string[],
+  token: string,
+  command: string = "git"
+): Effect.Effect<CommandResult, CommandNotFound | CommandFailed> {
+  return Effect.async<CommandResult, CommandNotFound | CommandFailed>(
+    (resume) => {
+      const gitArgs = [
+        "-c",
+        `credential.helper=!f() { echo "username=x-access-token"; echo "password=$APPTOKEN_GIT_TOKEN"; }; f`,
+        "-c",
+        "url.https://github.com/.insteadOf=git@github.com:",
+        ...args,
+      ];
+
+      const { GITHUB_TOKEN: _, GH_TOKEN: __, ...restEnv } = process.env;
+      const env = { ...restEnv, APPTOKEN_GIT_TOKEN: token };
+
+      let proc: ReturnType<typeof spawn>;
+
+      try {
+        proc = spawn(command, gitArgs, {
+          env,
+          stdio: ["inherit", "pipe", "pipe"],
+        });
+      } catch {
+        resume(Effect.fail(new CommandNotFound({ command })));
+        return;
+      }
+
+      let stdout = "";
+      let stderr = "";
+
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+
+      proc.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") {
+          resume(Effect.fail(new CommandNotFound({ command })));
+        } else {
+          resume(
+            Effect.fail(new CommandFailed({ exitCode: 1, stderr: String(err) }))
+          );
+        }
+      });
+
+      proc.on("close", (code) => {
+        const exitCode = code ?? 1;
+        if (exitCode !== 0) {
+          resume(Effect.fail(new CommandFailed({ exitCode, stderr })));
+        } else {
+          resume(Effect.succeed({ exitCode, stdout, stderr }));
+        }
+      });
+    }
+  );
+}
