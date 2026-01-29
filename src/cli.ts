@@ -25,6 +25,30 @@ import { validatePem } from "./validate-pem.ts";
 import { getPidPath, getSocketPath } from "./paths.ts";
 
 const verboseEnabled = process.argv.includes("--verbose");
+const ROOT_HELP = `apptoken v0.1.0
+
+Usage:
+  apptoken <command> [options]
+
+Commands:
+  init                      Interactive setup wizard
+  daemon start|stop|status  Manage daemon lifecycle
+  gh <args...>              Run gh with injected token
+
+Options:
+  --verbose                 Show detailed error output
+  -h, --help                Show this help message
+  --version                 Show version
+`;
+
+function shouldShowRootHelp(argv: string[]): boolean {
+  const args = argv.slice(2);
+  if (args.length === 0) return true;
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+    return true;
+  }
+  return false;
+}
 
 function makeTokenServiceFromConfig(pem: string, config: AppConfig) {
   return makeTokenService({
@@ -179,6 +203,10 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
 
   runDaemon(password).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain);
 } else {
+  if (shouldShowRootHelp(process.argv)) {
+    console.log(ROOT_HELP);
+    process.exit(0);
+  }
 
 // --- init command ---
 
