@@ -84,6 +84,8 @@ export function runGit(
     (resume) => {
       const gitArgs = [
         "-c",
+        "credential.helper=",
+        "-c",
         `credential.helper=!f() { echo "username=x-access-token"; echo "password=$APPTOKEN_GIT_TOKEN"; }; f`,
         "-c",
         "url.https://github.com/.insteadOf=git@github.com:",
