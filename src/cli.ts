@@ -1,5 +1,6 @@
 import { Args, Command, Options, Prompt } from "@effect/cli";
 import { BunContext, BunRuntime } from "@effect/platform-bun";
+import * as Terminal from "@effect/platform/Terminal";
 import { Console, Effect, Redacted } from "effect";
 import { spawn } from "child_process";
 import { existsSync, readFileSync } from "fs";
@@ -23,6 +24,7 @@ import { DaemonNotRunning, SocketError } from "./errors.ts";
 import { formatError } from "./format-error.ts";
 import { validatePem } from "./validate-pem.ts";
 import { getPidPath, getSocketPath } from "./paths.ts";
+import { readPemFromStream } from "./pem-input.ts";
 
 const verboseEnabled = process.argv.includes("--verbose");
 const ROOT_HELP = `apptoken v0.1.0
@@ -51,35 +53,16 @@ function shouldShowRootHelp(argv: string[]): boolean {
 }
 
 function readPemFromStdin() {
-  return Effect.async<string, never>((resume) => {
-    const stdin = process.stdin;
-    const chunks: string[] = [];
+  return Effect.gen(function* () {
+    yield* Effect.sync(() => {
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      process.stdin.removeAllListeners("keypress");
+      process.stdin.resume();
+    });
 
-    const cleanup = () => {
-      stdin.off("data", onData);
-      stdin.off("end", onEnd);
-      stdin.off("error", onError);
-    };
-
-    const onData = (chunk: string) => {
-      chunks.push(chunk);
-    };
-
-    const onEnd = () => {
-      cleanup();
-      resume(Effect.succeed(chunks.join("")));
-    };
-
-    const onError = () => {
-      cleanup();
-      resume(Effect.succeed(""));
-    };
-
-    stdin.setEncoding("utf8");
-    stdin.on("data", onData);
-    stdin.on("end", onEnd);
-    stdin.on("error", onError);
-    stdin.resume();
+    return yield* readPemFromStream(process.stdin, { handleSigint: true });
   });
 }
 
@@ -100,7 +83,7 @@ function makeTokenServiceFromConfig(pem: string, config: AppConfig) {
                 authorization: `Bearer ${jwt}`,
                 accept: "application/vnd.github+json",
               },
-            }
+            },
           );
           const body = (await res.json()) as {
             token: string;
@@ -163,7 +146,7 @@ function runDaemon(password: string) {
 
     if (configResult._tag === "Left") {
       yield* Console.error(
-        formatError(configResult.left, { verbose: verboseEnabled })
+        formatError(configResult.left, { verbose: verboseEnabled }),
       );
       yield* Effect.sync(() => process.exit(1));
       return;
@@ -175,14 +158,14 @@ function runDaemon(password: string) {
 
     if (encryptedResult._tag === "Left") {
       yield* Console.error(
-        formatError(encryptedResult.left, { verbose: verboseEnabled })
+        formatError(encryptedResult.left, { verbose: verboseEnabled }),
       );
       yield* Effect.sync(() => process.exit(1));
       return;
     }
 
     const decryptResult = yield* Effect.either(
-      decryptPem(encryptedResult.right, password)
+      decryptPem(encryptedResult.right, password),
     );
 
     if (decryptResult._tag === "Left") {
@@ -204,7 +187,7 @@ function runDaemon(password: string) {
 
     if (startResult._tag === "Left") {
       yield* Console.error(
-        formatError(startResult.left, { verbose: verboseEnabled })
+        formatError(startResult.left, { verbose: verboseEnabled }),
       );
       yield* Effect.sync(() => process.exit(1));
       return;
@@ -232,318 +215,334 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
     process.exit(1);
   }
 
-  runDaemon(password).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain);
+  runDaemon(password).pipe(
+    Effect.provide(BunContext.layer),
+    BunRuntime.runMain,
+  );
 } else {
   if (shouldShowRootHelp(process.argv)) {
     console.log(ROOT_HELP);
     process.exit(0);
   }
 
-// --- init command ---
+  // --- init command ---
 
-const initCommand = Command.make("init", {}, () =>
-  Effect.gen(function* () {
-    const appId = yield* Prompt.text({
-      message: "GitHub App ID:",
-      validate: (value) =>
-        value.trim().length === 0
-          ? Effect.fail("App ID is required")
-          : Effect.succeed(value.trim()),
-    });
-
-    const installationId = yield* Prompt.text({
-      message: "Installation ID:",
-      validate: (value) =>
-        value.trim().length === 0
-          ? Effect.fail("Installation ID is required")
-          : Effect.succeed(value.trim()),
-    });
-
-    const password = yield* Prompt.password({
-      message: "Encryption password:",
-      validate: (value) =>
-        value.length < 8
-          ? Effect.fail("Password must be at least 8 characters")
-          : Effect.succeed(value),
-    });
-
-    const confirmPassword = yield* Prompt.password({
-      message: "Confirm password:",
-    });
-
-    if (Redacted.value(password) !== Redacted.value(confirmPassword)) {
-      yield* Console.error("Passwords do not match.");
-      return;
-    }
-
-    yield* Console.log("Paste PEM private key. Finish with Ctrl+D:");
-    const pem = yield* readPemFromStdin();
-
-    const validation = validatePem(pem);
-    if (!validation.valid) {
-      yield* Console.error(validation.error ?? "Invalid PEM file");
-      return;
-    }
-
-    const encrypted = yield* encryptPem(pem, Redacted.value(password));
-
-    // Save encrypted PEM and config
-    const config: AppConfig = {
-      appId,
-      installationId,
-      createdAt: new Date().toISOString(),
-    };
-
-    yield* saveEncryptedPem(encrypted);
-    yield* saveConfig(config);
-
-    yield* Console.log("Configuration saved to " + getConfigDir());
-    yield* Console.log("Encrypted PEM stored at " + getPemPath());
-  })
-);
-
-// --- daemon start command ---
-
-const daemonStartCommand = Command.make("start", {}, () =>
-  Effect.gen(function* () {
-    const client = makeSocketClient(getSocketPath());
-    const pingResult = yield* Effect.either(client.ping());
-
-    if (pingResult._tag === "Right") {
-      yield* Console.error("Daemon is already running.");
-      return;
-    }
-
-    const configResult = yield* Effect.either(loadConfig());
-
-    if (configResult._tag === "Left") {
-      yield* Console.error(
-        formatError(configResult.left, { verbose: verboseEnabled })
-      );
-      return;
-    }
-
-    const config = configResult.right;
-    const encryptedResult = yield* Effect.either(loadEncryptedPem());
-
-    if (encryptedResult._tag === "Left") {
-      yield* Console.error(
-        formatError(encryptedResult.left, { verbose: verboseEnabled })
-      );
-      return;
-    }
-
-    const password = yield* Prompt.password({
-      message: "Password to decrypt PEM:",
-    });
-
-    const decryptResult = yield* Effect.either(
-      decryptPem(encryptedResult.right, Redacted.value(password))
-    );
-
-    if (decryptResult._tag === "Left") {
-      yield* Console.error(formatError(decryptResult.left));
-      return;
-    }
-
-    startDaemonProcess(Redacted.value(password));
-
-    const waitResult = yield* Effect.either(waitForDaemon(client));
-
-    if (waitResult._tag === "Left") {
-      yield* Console.error("Failed to start daemon.");
-      return;
-    }
-
-    const pidPath = getPidPath();
-    const pid = existsSync(pidPath) ? readFileSync(pidPath, "utf8").trim() : "";
-
-    yield* Console.log("Daemon started. Socket: " + getSocketPath());
-    if (pid) {
-      yield* Console.log("PID: " + pid);
-    }
-  })
-);
-
-// --- daemon stop command ---
-
-const daemonStopCommand = Command.make("stop", {}, () =>
-  Effect.gen(function* () {
-    const client = makeSocketClient(getSocketPath());
-    const pingResult = yield* Effect.either(client.ping());
-
-    if (pingResult._tag === "Left") {
-      yield* Console.error("Daemon is not running.");
-      return;
-    }
-
-    // Read PID from PID file and send SIGTERM
-    const pidPath = getPidPath();
-    if (existsSync(pidPath)) {
-      const pidContent = readFileSync(pidPath, "utf8").trim();
-      const pid = parseInt(pidContent, 10);
-      if (!Number.isNaN(pid)) {
-        try {
-          process.kill(pid, "SIGTERM");
-          yield* Console.log("Daemon stopped (PID: " + pid + ").");
-        } catch {
-          yield* Console.error("Failed to stop daemon process.");
-        }
-      }
-    } else {
-      yield* Console.error("PID file not found.");
-    }
-  })
-);
-
-// --- daemon status command ---
-
-const daemonStatusCommand = Command.make("status", {}, () =>
-  Effect.gen(function* () {
-    const client = makeSocketClient(getSocketPath());
-    const pingResult = yield* Effect.either(client.ping());
-
-    if (pingResult._tag === "Left") {
-      yield* Console.log("Daemon: stopped");
-      return;
-    }
-
-    const pidPath = getPidPath();
-    if (existsSync(pidPath)) {
-      const pidContent = readFileSync(pidPath, "utf8").trim();
-      yield* Console.log("Daemon: running (PID: " + pidContent + ")");
-    } else {
-      yield* Console.log("Daemon: running");
-    }
-  })
-);
-
-// --- daemon parent command ---
-
-const daemonCommand = Command.make("daemon").pipe(
-  Command.withSubcommands([
-    daemonStartCommand,
-    daemonStopCommand,
-    daemonStatusCommand,
-  ])
-);
-
-// --- gh command ---
-
-const ghArgs = Args.text({ name: "args" }).pipe(Args.repeated);
-const noDaemonStart = Options.boolean("no-daemon-start").pipe(
-  Options.withDefault(false)
-);
-
-const ghCommand = Command.make(
-  "gh",
-  { args: ghArgs, noDaemonStart },
-  ({ args, noDaemonStart }) =>
+  const initCommand = Command.make("init", {}, () =>
     Effect.gen(function* () {
-      const socketPath = getSocketPath();
-      const client = makeSocketClient(socketPath);
+      const appId = yield* Prompt.text({
+        message: "GitHub App ID:",
+        validate: (value) =>
+          value.trim().length === 0
+            ? Effect.fail("App ID is required")
+            : Effect.succeed(value.trim()),
+      });
 
-      // Try to get token
-      let tokenResult = yield* Effect.either(client.requestToken());
+      const installationId = yield* Prompt.text({
+        message: "Installation ID:",
+        validate: (value) =>
+          value.trim().length === 0
+            ? Effect.fail("Installation ID is required")
+            : Effect.succeed(value.trim()),
+      });
 
-      // Auto-start daemon if not running
-      if (
-        tokenResult._tag === "Left" &&
-        tokenResult.left instanceof DaemonNotRunning &&
-        !noDaemonStart
-      ) {
-        yield* Console.error("Daemon not running. Starting...");
+      const password = yield* Prompt.password({
+        message: "Encryption password:",
+        validate: (value) =>
+          value.length < 4
+            ? Effect.fail("Password must be at least 4 characters")
+            : Effect.succeed(value),
+      });
 
-        const configResult = yield* Effect.either(loadConfig());
+      const confirmPassword = yield* Prompt.password({
+        message: "Confirm password:",
+      });
 
-        if (configResult._tag === "Left") {
-          yield* Console.error(
-            formatError(configResult.left, { verbose: verboseEnabled })
-          );
-          return;
-        }
-
-        const config = configResult.right;
-
-        const encryptedResult = yield* Effect.either(loadEncryptedPem());
-
-        if (encryptedResult._tag === "Left") {
-          yield* Console.error(
-            formatError(encryptedResult.left, { verbose: verboseEnabled })
-          );
-          return;
-        }
-
-        const password = yield* Prompt.password({
-          message: "Password to decrypt PEM:",
-        });
-
-        const decryptResult = yield* Effect.either(
-          decryptPem(encryptedResult.right, Redacted.value(password))
-        );
-
-        if (decryptResult._tag === "Left") {
-          yield* Console.error(formatError(decryptResult.left));
-          return;
-        }
-
-        startDaemonProcess(Redacted.value(password));
-
-        const waitResult = yield* Effect.either(waitForDaemon(client));
-        if (waitResult._tag === "Left") {
-          yield* Console.error("Failed to start daemon.");
-          return;
-        }
-
-        // Retry token request
-        tokenResult = yield* Effect.either(client.requestToken());
+      if (Redacted.value(password) !== Redacted.value(confirmPassword)) {
+        yield* Console.error("Passwords do not match.");
+        return;
       }
 
-      if (tokenResult._tag === "Left") {
+      yield* Console.log(
+        "Paste PEM private key. Finish with the END line (-----END PRIVATE KEY-----).",
+      );
+      const pemResult = yield* Effect.either(readPemFromStdin());
+      if (pemResult._tag === "Left") {
+        if (Terminal.isQuitException(pemResult.left)) {
+          yield* Console.error("PEM input cancelled.");
+          return;
+        }
+        yield* Console.error("Failed to read PEM input.");
+        return;
+      }
+      const pem = pemResult.right.replace(/\r/g, "");
+
+      const validation = validatePem(pem);
+      if (!validation.valid) {
+        yield* Console.error(validation.error ?? "Invalid PEM file");
+        return;
+      }
+
+      const encrypted = yield* encryptPem(pem, Redacted.value(password));
+
+      // Save encrypted PEM and config
+      const config: AppConfig = {
+        appId,
+        installationId,
+        createdAt: new Date().toISOString(),
+      };
+
+      yield* saveEncryptedPem(encrypted);
+      yield* saveConfig(config);
+
+      yield* Console.log("Configuration saved to " + getConfigDir());
+      yield* Console.log("Encrypted PEM stored at " + getPemPath());
+    }),
+  );
+
+  // --- daemon start command ---
+
+  const daemonStartCommand = Command.make("start", {}, () =>
+    Effect.gen(function* () {
+      const client = makeSocketClient(getSocketPath());
+      const pingResult = yield* Effect.either(client.ping());
+
+      if (pingResult._tag === "Right") {
+        yield* Console.error("Daemon is already running.");
+        return;
+      }
+
+      const configResult = yield* Effect.either(loadConfig());
+
+      if (configResult._tag === "Left") {
         yield* Console.error(
-          formatError(tokenResult.left, { verbose: verboseEnabled })
+          formatError(configResult.left, { verbose: verboseEnabled }),
         );
         return;
       }
 
-      const { token } = tokenResult.right;
+      const config = configResult.right;
+      const encryptedResult = yield* Effect.either(loadEncryptedPem());
 
-      // Run gh with token
-      const result = yield* Effect.either(runGh(args, token));
-
-      if (result._tag === "Left") {
-        const error = result.left;
-        if (error instanceof CommandNotFound) {
-          yield* Console.error(
-            "gh CLI not found. Install it from https://cli.github.com"
-          );
-        } else {
-          if (error.stderr) {
-            yield* Console.error(error.stderr.trimEnd());
-          }
-          yield* Effect.sync(() => {
-            process.exitCode = error.exitCode;
-          });
-        }
+      if (encryptedResult._tag === "Left") {
+        yield* Console.error(
+          formatError(encryptedResult.left, { verbose: verboseEnabled }),
+        );
         return;
       }
 
-      if (result.right.stdout) {
-        yield* Console.log(result.right.stdout.trimEnd());
+      const password = yield* Prompt.password({
+        message: "Password to decrypt PEM:",
+      });
+
+      const decryptResult = yield* Effect.either(
+        decryptPem(encryptedResult.right, Redacted.value(password)),
+      );
+
+      if (decryptResult._tag === "Left") {
+        yield* Console.error(formatError(decryptResult.left));
+        return;
       }
-    })
-);
 
-// --- root command ---
+      startDaemonProcess(Redacted.value(password));
 
-const verbose = Options.boolean("verbose").pipe(
-  Options.withDescription("Show detailed error output"),
-  Options.withDefault(false),
-);
+      const waitResult = yield* Effect.either(waitForDaemon(client));
 
-const appCommand = Command.make("apptoken", { verbose }).pipe(
-  Command.withSubcommands([initCommand, daemonCommand, ghCommand])
-);
+      if (waitResult._tag === "Left") {
+        yield* Console.error("Failed to start daemon.");
+        return;
+      }
+
+      const pidPath = getPidPath();
+      const pid = existsSync(pidPath)
+        ? readFileSync(pidPath, "utf8").trim()
+        : "";
+
+      yield* Console.log("Daemon started. Socket: " + getSocketPath());
+      if (pid) {
+        yield* Console.log("PID: " + pid);
+      }
+    }),
+  );
+
+  // --- daemon stop command ---
+
+  const daemonStopCommand = Command.make("stop", {}, () =>
+    Effect.gen(function* () {
+      const client = makeSocketClient(getSocketPath());
+      const pingResult = yield* Effect.either(client.ping());
+
+      if (pingResult._tag === "Left") {
+        yield* Console.error("Daemon is not running.");
+        return;
+      }
+
+      // Read PID from PID file and send SIGTERM
+      const pidPath = getPidPath();
+      if (existsSync(pidPath)) {
+        const pidContent = readFileSync(pidPath, "utf8").trim();
+        const pid = parseInt(pidContent, 10);
+        if (!Number.isNaN(pid)) {
+          try {
+            process.kill(pid, "SIGTERM");
+            yield* Console.log("Daemon stopped (PID: " + pid + ").");
+          } catch {
+            yield* Console.error("Failed to stop daemon process.");
+          }
+        }
+      } else {
+        yield* Console.error("PID file not found.");
+      }
+    }),
+  );
+
+  // --- daemon status command ---
+
+  const daemonStatusCommand = Command.make("status", {}, () =>
+    Effect.gen(function* () {
+      const client = makeSocketClient(getSocketPath());
+      const pingResult = yield* Effect.either(client.ping());
+
+      if (pingResult._tag === "Left") {
+        yield* Console.log("Daemon: stopped");
+        return;
+      }
+
+      const pidPath = getPidPath();
+      if (existsSync(pidPath)) {
+        const pidContent = readFileSync(pidPath, "utf8").trim();
+        yield* Console.log("Daemon: running (PID: " + pidContent + ")");
+      } else {
+        yield* Console.log("Daemon: running");
+      }
+    }),
+  );
+
+  // --- daemon parent command ---
+
+  const daemonCommand = Command.make("daemon").pipe(
+    Command.withSubcommands([
+      daemonStartCommand,
+      daemonStopCommand,
+      daemonStatusCommand,
+    ]),
+  );
+
+  // --- gh command ---
+
+  const ghArgs = Args.text({ name: "args" }).pipe(Args.repeated);
+  const noDaemonStart = Options.boolean("no-daemon-start").pipe(
+    Options.withDefault(false),
+  );
+
+  const ghCommand = Command.make(
+    "gh",
+    { args: ghArgs, noDaemonStart },
+    ({ args, noDaemonStart }) =>
+      Effect.gen(function* () {
+        const socketPath = getSocketPath();
+        const client = makeSocketClient(socketPath);
+
+        // Try to get token
+        let tokenResult = yield* Effect.either(client.requestToken());
+
+        // Auto-start daemon if not running
+        if (
+          tokenResult._tag === "Left" &&
+          tokenResult.left instanceof DaemonNotRunning &&
+          !noDaemonStart
+        ) {
+          yield* Console.error("Daemon not running. Starting...");
+
+          const configResult = yield* Effect.either(loadConfig());
+
+          if (configResult._tag === "Left") {
+            yield* Console.error(
+              formatError(configResult.left, { verbose: verboseEnabled }),
+            );
+            return;
+          }
+
+          const config = configResult.right;
+
+          const encryptedResult = yield* Effect.either(loadEncryptedPem());
+
+          if (encryptedResult._tag === "Left") {
+            yield* Console.error(
+              formatError(encryptedResult.left, { verbose: verboseEnabled }),
+            );
+            return;
+          }
+
+          const password = yield* Prompt.password({
+            message: "Password to decrypt PEM:",
+          });
+
+          const decryptResult = yield* Effect.either(
+            decryptPem(encryptedResult.right, Redacted.value(password)),
+          );
+
+          if (decryptResult._tag === "Left") {
+            yield* Console.error(formatError(decryptResult.left));
+            return;
+          }
+
+          startDaemonProcess(Redacted.value(password));
+
+          const waitResult = yield* Effect.either(waitForDaemon(client));
+          if (waitResult._tag === "Left") {
+            yield* Console.error("Failed to start daemon.");
+            return;
+          }
+
+          // Retry token request
+          tokenResult = yield* Effect.either(client.requestToken());
+        }
+
+        if (tokenResult._tag === "Left") {
+          yield* Console.error(
+            formatError(tokenResult.left, { verbose: verboseEnabled }),
+          );
+          return;
+        }
+
+        const { token } = tokenResult.right;
+
+        // Run gh with token
+        const result = yield* Effect.either(runGh(args, token));
+
+        if (result._tag === "Left") {
+          const error = result.left;
+          if (error instanceof CommandNotFound) {
+            yield* Console.error(
+              "gh CLI not found. Install it from https://cli.github.com",
+            );
+          } else {
+            if (error.stderr) {
+              yield* Console.error(error.stderr.trimEnd());
+            }
+            yield* Effect.sync(() => {
+              process.exitCode = error.exitCode;
+            });
+          }
+          return;
+        }
+
+        if (result.right.stdout) {
+          yield* Console.log(result.right.stdout.trimEnd());
+        }
+      }),
+  );
+
+  // --- root command ---
+
+  const verbose = Options.boolean("verbose").pipe(
+    Options.withDescription("Show detailed error output"),
+    Options.withDefault(false),
+  );
+
+  const appCommand = Command.make("apptoken", { verbose }).pipe(
+    Command.withSubcommands([initCommand, daemonCommand, ghCommand]),
+  );
 
   const cli = Command.run(appCommand, {
     name: "apptoken",

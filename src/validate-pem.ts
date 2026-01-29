@@ -12,8 +12,16 @@ export function validatePem(pem: string): ValidateResult {
     pem.includes("-----BEGIN PRIVATE KEY-----") ||
     pem.includes("-----BEGIN RSA PRIVATE KEY-----");
 
+  const hasEndMarker =
+    pem.includes("-----END PRIVATE KEY-----") ||
+    pem.includes("-----END RSA PRIVATE KEY-----");
+
   if (!hasPrivateKey) {
     return { valid: false, error: "Expected a private key PEM" };
+  }
+
+  if (!hasEndMarker) {
+    return { valid: false, error: "PEM content is incomplete" };
   }
 
   return { valid: true };
