@@ -1,6 +1,29 @@
+import { createPrivateKey } from "crypto";
 import { Effect } from "effect";
 import { importPKCS8, SignJWT } from "jose";
 import { JwtGenerationError } from "../errors.ts";
+
+const RSA_PRIVATE_KEY_HEADER = "-----BEGIN RSA PRIVATE KEY-----";
+
+const normalizePrivateKeyPem = (pem: string): string => {
+  if (!pem.includes(RSA_PRIVATE_KEY_HEADER)) {
+    return pem;
+  }
+
+  try {
+    const key = createPrivateKey(pem);
+    const exported = key.export({ type: "pkcs8", format: "pem" }) as
+      | string
+      | Buffer;
+    return typeof exported === "string" ? exported : exported.toString("utf8");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      "Failed to convert RSA private key to PKCS8. Ensure the key is an unencrypted RSA private key. " +
+        message,
+    );
+  }
+};
 
 export const generateJwt = (
   pem: string,
@@ -8,7 +31,8 @@ export const generateJwt = (
 ): Effect.Effect<string, JwtGenerationError> =>
   Effect.tryPromise({
     try: async () => {
-      const privateKey = await importPKCS8(pem, "RS256");
+      const normalizedPem = normalizePrivateKeyPem(pem);
+      const privateKey = await importPKCS8(normalizedPem, "RS256");
       const now = Math.floor(Date.now() / 1000);
 
       return new SignJWT({})

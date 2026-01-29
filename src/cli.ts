@@ -263,7 +263,7 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
       }
 
       yield* Console.log(
-        "Paste PEM private key. Finish with the END line (-----END PRIVATE KEY-----).",
+        "Paste PEM private key. Finish with the END line (-----END PRIVATE KEY----- or -----END RSA PRIVATE KEY-----).",
       );
       const pemResult = yield* Effect.either(readPemFromStdin());
       if (pemResult._tag === "Left") {

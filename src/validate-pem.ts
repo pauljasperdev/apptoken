@@ -17,7 +17,10 @@ export function validatePem(pem: string): ValidateResult {
     pem.includes("-----END RSA PRIVATE KEY-----");
 
   if (!hasPrivateKey) {
-    return { valid: false, error: "Expected a private key PEM" };
+    return {
+      valid: false,
+      error: "Expected a private key PEM (PKCS8 or RSA)",
+    };
   }
 
   if (!hasEndMarker) {

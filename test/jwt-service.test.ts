@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import { generateJwt } from "../src/services/JwtService.ts";
 import { decodeProtectedHeader, decodeJwt, importSPKI, jwtVerify } from "jose";
-import { createPublicKey } from "crypto";
+import { createPrivateKey, createPublicKey } from "crypto";
 
 const TEST_PEM = `-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCQ4XfhEYhObgYJ
@@ -72,6 +72,18 @@ describe("JwtService", () => {
     const { payload } = await jwtVerify(jwt, publicKey, { algorithms: ["RS256"] });
 
     expect(payload.iss).toBe(APP_ID);
+  });
+
+  test("accepts PKCS1 RSA private keys", async () => {
+    const pkcs1Pem = createPrivateKey(TEST_PEM).export({
+      type: "pkcs1",
+      format: "pem",
+    }) as string;
+
+    const jwt = await Effect.runPromise(generateJwt(pkcs1Pem, APP_ID));
+    const header = decodeProtectedHeader(jwt);
+
+    expect(header.alg).toBe("RS256");
   });
 
   test("invalid PEM produces JwtGenerationError", async () => {
