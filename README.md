@@ -1,10 +1,11 @@
 # apptoken
 
-Generate and cache GitHub App installation tokens locally, then run `gh` with the token injected. The CLI stores your app config and encrypted private key so you can fetch short-lived tokens on demand.
+Generate and cache GitHub App installation tokens locally, then run `gh` or `git` with the token injected. The CLI stores your app config and encrypted private key so you can fetch short-lived tokens on demand.
 
 ## Prerequisites
 - Bun (runtime and build tool)
 - GitHub CLI (`gh`) if you plan to use `apptoken gh`
+- Git if you plan to use `apptoken git`
 
 ## Install
 ```sh
@@ -29,11 +30,16 @@ npx apptoken --help
    ```sh
    apptoken gh repo list
    ```
+4. Run Git commands against GitHub with an injected token:
+   ```sh
+   apptoken git fetch
+   ```
 
 ## Commands
 - `apptoken init` - interactive setup (App ID, Installation ID, PEM key, password)
 - `apptoken daemon start|stop|status` - manage background token daemon
 - `apptoken gh <args...>` - run `gh` with a fresh installation token
+- `apptoken git <args...>` - run `git` against GitHub with a fresh installation token
 
 ## Create a GitHub App
 1. Go to GitHub settings:
@@ -55,4 +61,5 @@ npx apptoken --help
 ## Troubleshooting
 - Ensure Bun is installed and on your PATH.
 - Ensure `gh` is installed if using the `apptoken gh` command.
+- Ensure `git` is installed if using the `apptoken git` command.
 - Run `apptoken --help` for usage details.
