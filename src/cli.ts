@@ -50,6 +50,39 @@ function shouldShowRootHelp(argv: string[]): boolean {
   return false;
 }
 
+function readPemFromStdin() {
+  return Effect.async<string, never>((resume) => {
+    const stdin = process.stdin;
+    const chunks: string[] = [];
+
+    const cleanup = () => {
+      stdin.off("data", onData);
+      stdin.off("end", onEnd);
+      stdin.off("error", onError);
+    };
+
+    const onData = (chunk: string) => {
+      chunks.push(chunk);
+    };
+
+    const onEnd = () => {
+      cleanup();
+      resume(Effect.succeed(chunks.join("")));
+    };
+
+    const onError = () => {
+      cleanup();
+      resume(Effect.succeed(""));
+    };
+
+    stdin.setEncoding("utf8");
+    stdin.on("data", onData);
+    stdin.on("end", onEnd);
+    stdin.on("error", onError);
+    stdin.resume();
+  });
+}
+
 function makeTokenServiceFromConfig(pem: string, config: AppConfig) {
   return makeTokenService({
     pem,
@@ -138,9 +171,7 @@ function runDaemon(password: string) {
 
     const config = configResult.right;
 
-    const encryptedResult = yield* Effect.either(
-      loadEncryptedPem(config.pemPath)
-    );
+    const encryptedResult = yield* Effect.either(loadEncryptedPem());
 
     if (encryptedResult._tag === "Left") {
       yield* Console.error(
@@ -212,14 +243,6 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
 
 const initCommand = Command.make("init", {}, () =>
   Effect.gen(function* () {
-    const pemPathStr = yield* Prompt.text({
-      message: "Path to PEM private key file:",
-      validate: (value) =>
-        !existsSync(value)
-          ? Effect.fail("File not found")
-          : Effect.succeed(value),
-    });
-
     const appId = yield* Prompt.text({
       message: "GitHub App ID:",
       validate: (value) =>
@@ -253,8 +276,9 @@ const initCommand = Command.make("init", {}, () =>
       return;
     }
 
-    // Read and encrypt PEM
-    const pem = readFileSync(pemPathStr, "utf8");
+    yield* Console.log("Paste PEM private key. Finish with Ctrl+D:");
+    const pem = yield* readPemFromStdin();
+
     const validation = validatePem(pem);
     if (!validation.valid) {
       yield* Console.error(validation.error ?? "Invalid PEM file");
@@ -264,11 +288,9 @@ const initCommand = Command.make("init", {}, () =>
     const encrypted = yield* encryptPem(pem, Redacted.value(password));
 
     // Save encrypted PEM and config
-    const pemPath = getPemPath();
     const config: AppConfig = {
       appId,
       installationId,
-      pemPath,
       createdAt: new Date().toISOString(),
     };
 
@@ -276,7 +298,7 @@ const initCommand = Command.make("init", {}, () =>
     yield* saveConfig(config);
 
     yield* Console.log("Configuration saved to " + getConfigDir());
-    yield* Console.log("Encrypted PEM stored at " + pemPath);
+    yield* Console.log("Encrypted PEM stored at " + getPemPath());
   })
 );
 
@@ -302,9 +324,7 @@ const daemonStartCommand = Command.make("start", {}, () =>
     }
 
     const config = configResult.right;
-    const encryptedResult = yield* Effect.either(
-      loadEncryptedPem(config.pemPath)
-    );
+    const encryptedResult = yield* Effect.either(loadEncryptedPem());
 
     if (encryptedResult._tag === "Left") {
       yield* Console.error(
@@ -445,9 +465,7 @@ const ghCommand = Command.make(
 
         const config = configResult.right;
 
-        const encryptedResult = yield* Effect.either(
-          loadEncryptedPem(config.pemPath)
-        );
+        const encryptedResult = yield* Effect.either(loadEncryptedPem());
 
         if (encryptedResult._tag === "Left") {
           yield* Console.error(

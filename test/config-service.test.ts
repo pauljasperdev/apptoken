@@ -7,7 +7,6 @@ import {
   loadConfig,
   saveEncryptedPem,
   loadEncryptedPem,
-  getPemPath,
   type AppConfig,
 } from "../src/services/ConfigService.ts";
 
@@ -82,11 +81,9 @@ describe("Config persistence", () => {
   test("save then load config returns same data", async () => {
     const tempDir = makeTempDir();
     try {
-      const pemPath = getPemPath(tempDir);
       const config: AppConfig = {
         appId: "12345",
         installationId: "67890",
-        pemPath,
         createdAt: new Date().toISOString(),
       };
 
@@ -99,7 +96,6 @@ describe("Config persistence", () => {
 
       expect(loaded.appId).toBe(config.appId);
       expect(loaded.installationId).toBe(config.installationId);
-      expect(loaded.pemPath).toBe(config.pemPath);
       expect(loaded.createdAt).toBe(config.createdAt);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -127,7 +123,7 @@ describe("Config persistence", () => {
       const loaded = await Effect.runPromise(
         Effect.gen(function* () {
           yield* saveEncryptedPem(encrypted, tempDir);
-          return yield* loadEncryptedPem(getPemPath(tempDir));
+          return yield* loadEncryptedPem(tempDir);
         })
       );
 
@@ -141,7 +137,7 @@ describe("Config persistence", () => {
     const tempDir = makeTempDir();
     try {
       const result = await Effect.runPromiseExit(
-        loadEncryptedPem(getPemPath(tempDir))
+        loadEncryptedPem(tempDir)
       );
 
       expect(result._tag).toBe("Failure");

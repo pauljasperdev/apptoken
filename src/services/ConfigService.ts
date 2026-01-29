@@ -13,7 +13,6 @@ import { homedir } from "os";
 export interface AppConfig {
   readonly appId: string;
   readonly installationId: string;
-  readonly pemPath: string;
   readonly createdAt: string;
 }
 
@@ -137,10 +136,10 @@ export const loadConfig = (
   });
 
 export const loadEncryptedPem = (
-  pemPath?: string
+  configDir?: string
 ): Effect.Effect<string, PemNotFound> =>
   Effect.gen(function* () {
-    const resolvedPath = pemPath ?? getPemPath();
+    const resolvedPath = getPemPath(configDir);
     if (!existsSync(resolvedPath)) {
       return yield* Effect.fail(new PemNotFound({ path: resolvedPath }));
     }
