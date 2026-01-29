@@ -19,7 +19,7 @@ import { generateJwt } from "./services/JwtService.ts";
 import { makeTokenService } from "./services/TokenService.ts";
 import { makeDaemonService } from "./services/DaemonService.ts";
 import { makeSocketClient } from "./services/SocketClient.ts";
-import { runGh, CommandNotFound } from "./services/CommandExecutor.ts";
+import { runGh, runGit, CommandNotFound } from "./services/CommandExecutor.ts";
 import { DaemonNotRunning, SocketError } from "./errors.ts";
 import { formatError } from "./format-error.ts";
 import { validatePem } from "./validate-pem.ts";
@@ -36,6 +36,7 @@ Commands:
   init                      Interactive setup wizard
   daemon start|stop|status  Manage daemon lifecycle
   gh <args...>              Run gh with injected token
+  git <args...>             Run git with injected token
 
 Options:
   --verbose                 Show detailed error output
@@ -432,6 +433,80 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
     ]),
   );
 
+  // --- shared token acquisition ---
+
+  function acquireToken(opts: { noDaemonStart: boolean }) {
+    return Effect.gen(function* () {
+      const socketPath = getSocketPath();
+      const client = makeSocketClient(socketPath);
+
+      // Try to get token
+      let tokenResult = yield* Effect.either(client.requestToken());
+
+      // Auto-start daemon if not running
+      if (
+        tokenResult._tag === "Left" &&
+        tokenResult.left instanceof DaemonNotRunning &&
+        !opts.noDaemonStart
+      ) {
+        yield* Console.error("Daemon not running. Starting...");
+
+        const configResult = yield* Effect.either(loadConfig());
+
+        if (configResult._tag === "Left") {
+          yield* Console.error(
+            formatError(configResult.left, { verbose: verboseEnabled }),
+          );
+          return yield* Effect.fail("abort" as const);
+        }
+
+        const config = configResult.right;
+
+        const encryptedResult = yield* Effect.either(loadEncryptedPem());
+
+        if (encryptedResult._tag === "Left") {
+          yield* Console.error(
+            formatError(encryptedResult.left, { verbose: verboseEnabled }),
+          );
+          return yield* Effect.fail("abort" as const);
+        }
+
+        const password = yield* Prompt.password({
+          message: "Password to decrypt PEM:",
+        });
+
+        const decryptResult = yield* Effect.either(
+          decryptPem(encryptedResult.right, Redacted.value(password)),
+        );
+
+        if (decryptResult._tag === "Left") {
+          yield* Console.error(formatError(decryptResult.left));
+          return yield* Effect.fail("abort" as const);
+        }
+
+        startDaemonProcess(Redacted.value(password));
+
+        const waitResult = yield* Effect.either(waitForDaemon(client));
+        if (waitResult._tag === "Left") {
+          yield* Console.error("Failed to start daemon.");
+          return yield* Effect.fail("abort" as const);
+        }
+
+        // Retry token request
+        tokenResult = yield* Effect.either(client.requestToken());
+      }
+
+      if (tokenResult._tag === "Left") {
+        yield* Console.error(
+          formatError(tokenResult.left, { verbose: verboseEnabled }),
+        );
+        return yield* Effect.fail("abort" as const);
+      }
+
+      return tokenResult.right.token;
+    });
+  }
+
   // --- gh command ---
 
   const ghArgs = Args.text({ name: "args" }).pipe(Args.repeated);
@@ -444,73 +519,15 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
     { args: ghArgs, noDaemonStart },
     ({ args, noDaemonStart }) =>
       Effect.gen(function* () {
-        const socketPath = getSocketPath();
-        const client = makeSocketClient(socketPath);
-
-        // Try to get token
-        let tokenResult = yield* Effect.either(client.requestToken());
-
-        // Auto-start daemon if not running
-        if (
-          tokenResult._tag === "Left" &&
-          tokenResult.left instanceof DaemonNotRunning &&
-          !noDaemonStart
-        ) {
-          yield* Console.error("Daemon not running. Starting...");
-
-          const configResult = yield* Effect.either(loadConfig());
-
-          if (configResult._tag === "Left") {
-            yield* Console.error(
-              formatError(configResult.left, { verbose: verboseEnabled }),
-            );
-            return;
-          }
-
-          const config = configResult.right;
-
-          const encryptedResult = yield* Effect.either(loadEncryptedPem());
-
-          if (encryptedResult._tag === "Left") {
-            yield* Console.error(
-              formatError(encryptedResult.left, { verbose: verboseEnabled }),
-            );
-            return;
-          }
-
-          const password = yield* Prompt.password({
-            message: "Password to decrypt PEM:",
-          });
-
-          const decryptResult = yield* Effect.either(
-            decryptPem(encryptedResult.right, Redacted.value(password)),
-          );
-
-          if (decryptResult._tag === "Left") {
-            yield* Console.error(formatError(decryptResult.left));
-            return;
-          }
-
-          startDaemonProcess(Redacted.value(password));
-
-          const waitResult = yield* Effect.either(waitForDaemon(client));
-          if (waitResult._tag === "Left") {
-            yield* Console.error("Failed to start daemon.");
-            return;
-          }
-
-          // Retry token request
-          tokenResult = yield* Effect.either(client.requestToken());
-        }
+        const tokenResult = yield* Effect.either(
+          acquireToken({ noDaemonStart }),
+        );
 
         if (tokenResult._tag === "Left") {
-          yield* Console.error(
-            formatError(tokenResult.left, { verbose: verboseEnabled }),
-          );
           return;
         }
 
-        const { token } = tokenResult.right;
+        const token = tokenResult.right;
 
         // Run gh with token
         const result = yield* Effect.either(runGh(args, token));
@@ -519,21 +536,55 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
           const error = result.left;
           if (error instanceof CommandNotFound) {
             yield* Console.error(
-              "gh CLI not found. Install it from https://cli.github.com",
+              formatError(error, { verbose: verboseEnabled }),
             );
           } else {
-            if (error.stderr) {
-              yield* Console.error(error.stderr.trimEnd());
-            }
             yield* Effect.sync(() => {
               process.exitCode = error.exitCode;
             });
           }
           return;
         }
+      }),
+  );
 
-        if (result.right.stdout) {
-          yield* Console.log(result.right.stdout.trimEnd());
+  // --- git command ---
+
+  const gitArgs = Args.text({ name: "args" }).pipe(Args.repeated);
+  const gitNoDaemonStart = Options.boolean("no-daemon-start").pipe(
+    Options.withDefault(false),
+  );
+
+  const gitCommand = Command.make(
+    "git",
+    { args: gitArgs, noDaemonStart: gitNoDaemonStart },
+    ({ args, noDaemonStart }) =>
+      Effect.gen(function* () {
+        const tokenResult = yield* Effect.either(
+          acquireToken({ noDaemonStart }),
+        );
+
+        if (tokenResult._tag === "Left") {
+          return;
+        }
+
+        const token = tokenResult.right;
+
+        // Run git with token
+        const result = yield* Effect.either(runGit(args, token));
+
+        if (result._tag === "Left") {
+          const error = result.left;
+          if (error instanceof CommandNotFound) {
+            yield* Console.error(
+              formatError(error, { verbose: verboseEnabled }),
+            );
+          } else {
+            yield* Effect.sync(() => {
+              process.exitCode = error.exitCode;
+            });
+          }
+          return;
         }
       }),
   );
@@ -546,7 +597,7 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
   );
 
   const appCommand = Command.make("apptoken", { verbose }).pipe(
-    Command.withSubcommands([initCommand, daemonCommand, ghCommand]),
+    Command.withSubcommands([initCommand, daemonCommand, ghCommand, gitCommand]),
   );
 
   const cli = Command.run(appCommand, {

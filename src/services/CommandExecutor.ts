@@ -44,10 +44,12 @@ export function runGh(
       let stderr = "";
 
       proc.stdout?.on("data", (chunk: Buffer) => {
+        process.stdout.write(chunk);
         stdout += chunk.toString();
       });
 
       proc.stderr?.on("data", (chunk: Buffer) => {
+        process.stderr.write(chunk);
         stderr += chunk.toString();
       });
 
@@ -55,9 +57,9 @@ export function runGh(
         if (err.code === "ENOENT") {
           resume(Effect.fail(new CommandNotFound({ command })));
         } else {
-          resume(
-            Effect.fail(new CommandFailed({ exitCode: 1, stderr: String(err) }))
-          );
+          const message = String(err);
+          process.stderr.write(message + "\n");
+          resume(Effect.fail(new CommandFailed({ exitCode: 1, stderr: message })));
         }
       });
 
@@ -107,10 +109,12 @@ export function runGit(
       let stderr = "";
 
       proc.stdout?.on("data", (chunk: Buffer) => {
+        process.stdout.write(chunk);
         stdout += chunk.toString();
       });
 
       proc.stderr?.on("data", (chunk: Buffer) => {
+        process.stderr.write(chunk);
         stderr += chunk.toString();
       });
 
@@ -118,9 +122,9 @@ export function runGit(
         if (err.code === "ENOENT") {
           resume(Effect.fail(new CommandNotFound({ command })));
         } else {
-          resume(
-            Effect.fail(new CommandFailed({ exitCode: 1, stderr: String(err) }))
-          );
+          const message = String(err);
+          process.stderr.write(message + "\n");
+          resume(Effect.fail(new CommandFailed({ exitCode: 1, stderr: message })));
         }
       });
 
