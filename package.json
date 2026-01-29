@@ -1,0 +1,30 @@
+{
+  "name": "apptoken",
+  "version": "0.1.0",
+  "description": "GitHub App token provider CLI",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "apptoken": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "build": "bun build ./src/cli.ts --outfile ./dist/cli.js --target bun",
+    "lint": "bash -c 'oxlint $(find src test -name \"*.ts\" 2>/dev/null)'",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run lint && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "oxlint": "latest",
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "effect": "latest",
+    "@effect/cli": "latest",
+    "@effect/platform": "latest",
+    "@effect/platform-bun": "latest",
+    "jose": "latest"
+  }
+}
