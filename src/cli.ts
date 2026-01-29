@@ -275,6 +275,11 @@ if (process.env["APPTOKEN_DAEMON"] === "1") {
         return;
       }
       const pem = pemResult.right.replace(/\r/g, "");
+      if (!pem.endsWith("\n")) {
+        yield* Effect.sync(() => {
+          process.stdout.write("\n");
+        });
+      }
 
       const validation = validatePem(pem);
       if (!validation.valid) {
