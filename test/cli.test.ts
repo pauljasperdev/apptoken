@@ -19,6 +19,7 @@ describe("CLI", () => {
     expect(stdout).toContain("init");
     expect(stdout).toContain("daemon");
     expect(stdout).toContain("gh");
+    expect(stdout).toContain("git");
   });
 
   test("--version prints version", async () => {

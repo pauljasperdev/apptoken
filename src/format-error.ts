@@ -61,7 +61,10 @@ export function formatError(error: unknown, options?: FormatErrorOptions): strin
   }
 
   if (error instanceof CommandNotFound) {
-    return `gh CLI not found. Install it from https://cli.github.com`;
+    if (error.command === "git") {
+      return "git not found. Install git to use this command.";
+    }
+    return "gh CLI not found. Install it from https://cli.github.com";
   }
 
   if (error instanceof JwtGenerationError) {

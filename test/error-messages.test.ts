@@ -71,6 +71,13 @@ describe("formatError", () => {
     expect(message).toContain("https://cli.github.com");
   });
 
+  test("CommandNotFound for git suggests installing git", () => {
+    const error = new CommandNotFound({ command: "git" });
+    const message = formatError(error);
+    expect(message).toContain("git not found");
+    expect(message).not.toContain("cli.github.com");
+  });
+
   test("JwtGenerationError shows generation failure", () => {
     const error = new JwtGenerationError({ message: "bad key" });
     const message = formatError(error);
