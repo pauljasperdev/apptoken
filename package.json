@@ -1,6 +1,6 @@
 {
   "name": "apptoken",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "GitHub App token provider CLI",
   "type": "module",
   "main": "./dist/cli.js",
